@@ -14,49 +14,43 @@ internal static class DoubleDeleteTests
     static Packet State(string id="A",long epoch=1,long root=42,long owner=1){return new Packet{Id=id,Epoch=epoch,Root=root,Owner=owner,Stamp=ActionRules.Now};}
     static void GestureTests()
     {
-        Check(DeleteGesture.Interval==ActionRules.DoublePressMilliseconds,"Delete and refresh share the same interval");
-        var events=new BlockingCollection<string>();
+        Check(DeleteGesture.Interval==ActionRules.DoublePressMilliseconds,"Delete and refresh share interval");
+        var events=new BlockingCollection<string>();string value;
         using(var gesture=new DeleteGesture((p,op)=>events.Add(op+":"+p.Id))) {
-            gesture.Press(State());string value;
-            Check(!events.TryTake(out value,100),"single delete is deferred");
-            Check(events.TryTake(out value,1500)&&value=="delete:A","single delete fires after interval");
-            Check(!events.TryTake(out value,100),"single delete fires once");
-            gesture.Press(State());gesture.Press(State("a"));
-            Check(events.TryTake(out value,100)&&value=="clear:A","second matching press replaces single with clear");
-            Check(!events.TryTake(out value,DeleteGesture.Interval+100),"double delete cancels old single timer");
-            gesture.Press(State());gesture.Cancel();
-            Check(!events.TryTake(out value,DeleteGesture.Interval+100),"cancel prevents deferred single");
+            gesture.Press(State());
+            Check(events.TryTake(out value,0)&&value=="delete:A","first press deletes synchronously");
+            Check(gesture.TryComplete(p=>true),"second press completes double gesture");
+            Check(events.TryTake(out value,0)&&value=="clear:A","second press clears once");
+            Check(!gesture.TryComplete(p=>true)&&events.Count==0,"duplicate completion does nothing");
+            gesture.Press(State());events.Take();gesture.Cancel();
+            Check(!gesture.TryComplete(p=>true)&&events.Count==0,"cancel removes double arm without undoing first delete");
         }
-        foreach(string field in new[]{"Id","Epoch","Root","Owner"}) {
-            using(var gesture=new DeleteGesture((p,op)=>events.Add(op+":"+p.Id))) {
-                gesture.Press(State());var next=State();
-                if(field=="Id")next.Id="B";if(field=="Epoch")next.Epoch=2;if(field=="Root")next.Root=43;if(field=="Owner")next.Owner=2;
-                gesture.Press(next);string value;
-                Check(!events.TryTake(out value,50),field+" change cannot trigger clear");
-                Check(events.TryTake(out value,1500)&&value=="delete:"+next.Id,field+" change arms only new single");
-                Check(!events.TryTake(out value,60),field+" change cancels old single");
+        foreach(string field in new[]{"Epoch","Root","Owner"}) {
+            using(var gesture=new DeleteGesture((p,op)=>events.Add(op))) {
+                var context=State();gesture.Press(context);events.Take();
+                var next=State();if(field=="Epoch")next.Epoch++;if(field=="Root")next.Root++;if(field=="Owner")next.Owner++;
+                Check(!gesture.TryComplete(p=>p.Epoch==next.Epoch&&p.Root==next.Root&&p.Owner==next.Owner),field+" mismatch rejects clear");
+                Check(events.Count==0&&!gesture.TryComplete(p=>true),field+" rejection consumes stale arm");
             }
         }
         using(var gesture=new DeleteGesture((p,op)=>events.Add(op+":"+p.Id))) {
-            var source=State();gesture.Press(source);source.Id="MUTATED";string value;
-            Check(events.TryTake(out value,1500)&&value=="delete:A","pending selection is immutable snapshot");
-            gesture.Press(State());
-            var saved=(Packet)typeof(DeleteGesture).GetField("first",BindingFlags.NonPublic|BindingFlags.Instance).GetValue(gesture);
-            gesture.Cancel();
-            typeof(DeleteGesture).GetMethod("Single",BindingFlags.NonPublic|BindingFlags.Instance).Invoke(gesture,new object[]{saved});
-            Check(!events.TryTake(out value,50),"already queued callback after cancel is harmless");
+            var original=State();gesture.Press(original);events.Take();original.Id="B";
+            Check(gesture.TryComplete(p=>p.Root==original.Root&&p.Owner==original.Owner&&p.Epoch==original.Epoch),"selection ID change after delete permits clear");
+            Check(events.Take()=="clear:A","clear retains original immutable snapshot");
+            gesture.Press(State());events.Take();Thread.Sleep(DeleteGesture.Interval+20);
+            Check(!gesture.TryComplete(p=>true)&&events.Count==0,"expired double cannot clear and has no timer action");
         }
-        var disposed=new DeleteGesture((p,op)=>events.Add(op));disposed.Press(State());disposed.Dispose();disposed.Press(State());
-        string ignored;Check(!events.TryTake(out ignored,DeleteGesture.Interval+100),"dispose cancels old timer and ignores new press");
+        var disposed=new DeleteGesture((p,op)=>events.Add(op));disposed.Press(State());events.Take();disposed.Dispose();disposed.Press(State());
+        Check(!disposed.TryComplete(p=>true)&&events.Count==0,"dispose blocks presses and completion");
         using(var gesture=new DeleteGesture((p,op)=>events.Add(op))) {
             var trigger=new ReleaseTrigger();
-            trigger.Press(()=>{gesture.Press(State());return true;});
-            for(int i=0;i<30;i++)trigger.Press(()=>{gesture.Press(State());return true;});
-            Check(!events.TryTake(out ignored,80),"held autorepeats cannot synthesize double delete");
-            trigger.Release(()=>{});
-            trigger.Press(()=>{gesture.Press(State());return true;});trigger.Release(()=>{});
-            Check(events.TryTake(out ignored,100)&&ignored=="clear","real up then down triggers clear");
-            Check(!events.TryTake(out ignored,DeleteGesture.Interval+100),"repeat plus real double yields one action");
+            Func<bool> press=()=>{if(!gesture.TryComplete(p=>true))gesture.Press(State());return true;};
+            trigger.Press(press);
+            Check(events.Take()=="delete","hook first down immediately deletes");
+            for(int i=0;i<30;i++)trigger.Press(press);
+            Check(events.Count==0,"held autorepeats do not delete or clear");
+            trigger.Release(()=>{});trigger.Press(press);trigger.Release(()=>{});
+            Check(events.Take()=="clear"&&events.Count==0,"real up then down clears once");
         }
     }
     sealed class Mock : IDisposable
@@ -85,7 +79,7 @@ internal static class DoubleDeleteTests
             Check(b.Focused&&b.Pin=="Pinned","clear preserves pinned B");
             Check(mock.Change("delete","B")=="blocked","B remains protected after clear");
             mock.Change("select","A");Check(!mock.Await(p=>p.Kind=="state"&&p.Id=="A").Focused,"clear removes unpinned A");
-            Check(mock.Change("clear")=="blocked","clear requires a live selected row");
+            Check(mock.Change("clear")=="cleared","clear permits missing selected row after first delete");
             mock.Change("select","B");
             Check(mock.Change("clear","B")=="cleared","repeated clear handles all-pinned storage");
             mock.Send(new Packet{Kind="reset",Epoch=2,Owner=1});mock.Await(p=>p.Kind=="state"&&p.Epoch==2);

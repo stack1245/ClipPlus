@@ -167,15 +167,22 @@ namespace ClipboardExtensionClean
                 throw new InvalidOperationException("선택 항목 또는 입력 창이 바뀌었습니다.");
             return current;
         }
+        private bool VerifyPopup(Packet request)
+        {
+            if(request.Epoch!=epoch || request.Epoch!=fence.Value
+                || !ActionRules.Fresh(request.Stamp,ActionRules.Now,1200)
+                || owner!=request.Owner || Native.GetForegroundWindow().ToInt64()!=request.Owner
+                || Panel(new IntPtr(request.Root))==null)
+                throw new InvalidOperationException("클립보드 창이 바뀌었거나 요청이 만료됐습니다.");
+            return true;
+        }
 
         public async Task<string> Change(Packet request)
         {
-            Packet before = Verify(request);
-            PinState pin; Enum.TryParse(before.Pin, out pin);
             if(request.Operation=="clear")
             {
                 string result=await StaClipboard.ClearAsync(()=> {
-                    Verify(request);return true;
+                    return VerifyPopup(request);
                 },()=>request.Epoch==fence.Value && ActionRules.Fresh(request.Stamp,ActionRules.Now,1200)
                     && Native.GetForegroundWindow().ToInt64()==request.Owner
                     && Native.IsWindowVisible(new IntPtr(request.Root)));
@@ -202,6 +209,8 @@ namespace ClipboardExtensionClean
                 catch(Exception error){Wire.Log("clear scroll reset: "+error.GetType().Name);}
                 return result;
             }
+            Packet before = Verify(request);
+            PinState pin; Enum.TryParse(before.Pin, out pin);
             if (request.Operation == "delete")
             {
                 if (!ActionRules.CanDelete(request.Id, before.Id, pin)) return "고정 항목은 삭제하지 않습니다.";
@@ -244,7 +253,6 @@ namespace ClipboardExtensionClean
             var current=Probe(); PinState pin; Enum.TryParse(current.Pin,out pin);
             if(request.Operation=="clear")
             {
-                if(!current.Focused || !string.Equals(current.Id,request.Id,StringComparison.OrdinalIgnoreCase))return "blocked";
                 foreach(var id in items.Where(x=>x.Value==PinState.Unpinned).Select(x=>x.Key).ToArray())items.Remove(id);
                 return "cleared";
             }

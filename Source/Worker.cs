@@ -92,6 +92,9 @@ namespace ClipboardExtensionClean
         private Packet latest=new Packet();
         private Packet armedToggle;
         private readonly DeleteGesture deleteGesture;
+        private readonly object requestGate=new object();
+        private readonly DeferredClear deferredClear=new DeferredClear();
+        private bool disposed;
         private sealed class PendingRequest
         {
             internal readonly string Id=Guid.NewGuid().ToString("N");
@@ -151,9 +154,14 @@ namespace ClipboardExtensionClean
                         && packet.Operation=="pin-provider-start")
                         Volatile.Write(ref outstanding.PinProviderStarted,1);
                     if(packet.Kind=="result" && outstanding!=null && packet.Request==outstanding.Id) {
+                      lock(requestGate) {
+                        if(!ReferenceEquals(Volatile.Read(ref pending),outstanding))continue;
                         Status=packet.Error ?? "";
                         Interlocked.CompareExchange(ref pending,null,outstanding);
                         if(Status.Length!=0) Wire.Log("action: "+Status);
+                        var next=deferredClear.Take(outstanding.Id,Interlocked.Read(ref epoch),ActionRules.Now);
+                        if(next!=null && ContextMatches(next))QueueOperation(next,"clear");
+                      }
                     }
                 }
             } catch(Exception error) {Interlocked.Exchange(ref transportFault,1);Wire.Log("worker receive: "+error.GetType().Name);}
@@ -166,14 +174,18 @@ namespace ClipboardExtensionClean
         internal void Reset(long owner,int pause)
         {
             deleteGesture.Cancel();
+          lock(requestGate) {
+            deferredClear.Cancel();
             long next=Interlocked.Increment(ref epoch);
             Volatile.Write(ref latest,new Packet());
             Interlocked.Exchange(ref armedToggle,null);
             // Keep the in-flight watchdog armed even when its context expires.
             Write(new Packet {Kind="reset",Epoch=next,Owner=owner,Stamp=pause});
+          }
         }
         internal bool TryAction(bool toggle)
         {
+            if(!toggle && deleteGesture.TryComplete(ContextMatches))return true;
             var state=Latest;
             if(state.Epoch!=Interlocked.Read(ref epoch) || !state.Visible || !state.Focused || !ActionRules.Fresh(state.Stamp,ActionRules.Now,450)
                 || Native.GetForegroundWindow().ToInt64()!=state.Owner
@@ -194,11 +206,17 @@ namespace ClipboardExtensionClean
         internal void CancelDeleteGesture()
         {
             deleteGesture.Cancel();
+            lock(requestGate)deferredClear.Cancel();
             var active=Volatile.Read(ref pending);
             if(active!=null && active.Operation=="clear")Reset(Latest.Owner,0);
         }
         private void CommitDelete(Packet saved,string operation)
         {
+            if(operation=="clear")
+            {
+                if(ContextMatches(saved))QueueOperation(saved,operation);
+                return;
+            }
             var current=Latest;
             if(saved.Epoch!=Interlocked.Read(ref epoch) || !ActionRules.Fresh(saved.Stamp,ActionRules.Now,1200)
                 || !current.Focused || current.Epoch!=saved.Epoch || current.Root!=saved.Root || current.Owner!=saved.Owner
@@ -206,6 +224,11 @@ namespace ClipboardExtensionClean
                 || !ActionRules.Fresh(current.Stamp,ActionRules.Now,450)
                 || Native.GetForegroundWindow().ToInt64()!=saved.Owner || !Native.IsWindowVisible(new IntPtr(saved.Root)))return;
             QueueOperation(saved,operation);
+        }
+        private bool ContextMatches(Packet saved)
+        {
+            return saved.Epoch==Interlocked.Read(ref epoch) && ActionRules.Fresh(saved.Stamp,ActionRules.Now,1200)
+                && Native.GetForegroundWindow().ToInt64()==saved.Owner && Native.IsWindowVisible(new IntPtr(saved.Root));
         }
         internal Action TakeToggleCommit()
         {
@@ -232,11 +255,20 @@ namespace ClipboardExtensionClean
         }
         private bool QueueOperation(Packet state,string operation)
         {
+          lock(requestGate) {
+            if(disposed)return false;
+            var active=Volatile.Read(ref pending);
+            if(active!=null)
+            {
+                if(operation=="clear" && active.Operation=="delete")deferredClear.Store(state,active.Id);
+                return true;
+            }
             var request=new PendingRequest {Operation=operation};
             if(Interlocked.CompareExchange(ref pending,request,null)!=null)return true;
             Write(new Packet {Kind="change",Operation=operation,Id=state.Id,Root=state.Root,
                 Owner=state.Owner,Stamp=state.Stamp,Epoch=state.Epoch,Request=request.Id});
             return true;
+          }
         }
         internal string HealthError
         {
@@ -267,6 +299,7 @@ namespace ClipboardExtensionClean
         public void Dispose()
         {
             deleteGesture.Dispose();
+            lock(requestGate){disposed=true;deferredClear.Cancel();}
             Interlocked.Exchange(ref armedToggle,null);
             outbound.CompleteAdding();
             try {if(child!=null && !child.HasExited){child.Kill();child.WaitForExit(2000);}}catch{}
