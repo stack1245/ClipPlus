@@ -1,0 +1,9 @@
+artifacts/
+*.exe
+*.dll
+*.pdb
+*.winmd
+*.log
+.vs/
+.local/
+*.user
