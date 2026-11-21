@@ -9,6 +9,7 @@ namespace ClipboardExtensionClean
 
     public static class ActionRules
     {
+        public const int DoublePressMilliseconds=200;
         public static bool ValidPinBounds(double x,double y,double width,double height)
         {
             return !double.IsNaN(x) && !double.IsInfinity(x) && !double.IsNaN(y) && !double.IsInfinity(y)

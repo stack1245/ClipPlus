@@ -4,7 +4,7 @@ namespace ClipboardExtensionClean
 {
     internal sealed class DeleteGesture : IDisposable
     {
-        internal const int Interval=400;
+        internal const int Interval=ActionRules.DoublePressMilliseconds;
         private readonly object gate=new object();
         private readonly Action<Packet,string> dispatch;
         private Packet first;
@@ -35,7 +35,7 @@ namespace ClipboardExtensionClean
             lock(gate)
             {
                 if(disposed || !ReferenceEquals(first,saved))return;
-                int remaining=Interval-(int)(ActionRules.Now-saved.Stamp);
+                int remaining=Interval+1-(int)(ActionRules.Now-saved.Stamp);
                 if(remaining>0){timer.Change(remaining,Timeout.Infinite);return;}
                 CancelLocked();
                 try{dispatch(saved,"delete");}

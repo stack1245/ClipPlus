@@ -14,6 +14,7 @@ internal static class DoubleDeleteTests
     static Packet State(string id="A",long epoch=1,long root=42,long owner=1){return new Packet{Id=id,Epoch=epoch,Root=root,Owner=owner,Stamp=ActionRules.Now};}
     static void GestureTests()
     {
+        Check(DeleteGesture.Interval==ActionRules.DoublePressMilliseconds,"Delete and refresh share the same interval");
         var events=new BlockingCollection<string>();
         using(var gesture=new DeleteGesture((p,op)=>events.Add(op+":"+p.Id))) {
             gesture.Press(State());string value;

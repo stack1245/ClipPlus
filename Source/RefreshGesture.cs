@@ -12,7 +12,7 @@ namespace ClipboardExtensionClean
             if(held)return false;
             held=true;
             if(!win){previous=-1;return false;}
-            bool twice=previous>=0 && now>=previous && now-previous<=1000;
+            bool twice=ActionRules.Fresh(previous,now,ActionRules.DoublePressMilliseconds);
             previous=twice?-1:now;
             return twice;
         }
