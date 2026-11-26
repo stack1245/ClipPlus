@@ -69,13 +69,14 @@ namespace ClipboardExtensionClean
                 bool toggle=key.Key==45;var trigger=toggle?insert:delete;
                 if(up && trigger.Release(()=> {
                     if(toggle)try{var commit=releaseToggle();if(commit!=null)window.BeginInvoke(commit);}catch{}
-                }))return (IntPtr)1;
+                })){Wire.LogAsync("key up consumed vk="+key.Key+" flags="+key.Flags);return (IntPtr)1;}
                 if(!down)return Native.CallNextHookEx(hook,code,message,data);
                 if(trigger.Press(()=> {
                     foreach(int modifier in new[]{16,17,18,91,92})
-                        if((Native.GetAsyncKeyState(modifier)&0x8000)!=0)return false;
+                        if((Native.GetAsyncKeyState(modifier)&0x8000)!=0){Wire.LogAsync("key modified vk="+key.Key+" modifier="+modifier);return false;}
                     return action(toggle);
-                }))return (IntPtr)1;
+                })){Wire.LogAsync("key down consumed vk="+key.Key+" flags="+key.Flags);return (IntPtr)1;}
+                Wire.LogAsync("key down passed vk="+key.Key+" flags="+key.Flags);
             } catch { }
             return Native.CallNextHookEx(hook,code,message,data);
         }

@@ -26,6 +26,11 @@ namespace ClipboardExtensionClean
 
     internal static class Wire
     {
+        internal static void LogAsync(string message)
+        {
+            string captured="mono="+ActionRules.Now+" "+message;
+            ThreadPool.QueueUserWorkItem(_=>Log(captured));
+        }
         public static string Encode(Packet packet) { return new JavaScriptSerializer().Serialize(packet); }
         public static Packet Decode(string line) { return new JavaScriptSerializer().Deserialize<Packet>(line); }
         public static void Log(string message)

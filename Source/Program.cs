@@ -20,7 +20,7 @@ namespace ClipboardExtensionClean
         {
             var handle=dispatcher.Handle;
             worker=new WorkerClient();
-            keyboard=new KeyboardPump(toggle=>worker!=null && worker.TryAction(toggle),
+            keyboard=new KeyboardPump(toggle=>worker!=null && worker.HandleKey(toggle),
                 (owner,pause)=>{var current=worker;if(current!=null)current.Reset(owner,pause);},
                 ()=>dispatcher.BeginInvoke((Action)Refresh),
                 ()=>{var current=worker;return current==null?null:current.TakeToggleCommit();},

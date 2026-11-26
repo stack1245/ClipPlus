@@ -72,6 +72,9 @@ namespace ClipboardExtensionClean
                         try {result=surface.Change(command).GetAwaiter().GetResult();}
                         catch(Exception error){result=error.Message;}
                         Wire.Log("change end "+command.Request+" result="+result);
+                        if(!(surface is MockSurface))Wire.LogAsync("change native window request="+command.Request
+                            +" ownerBefore="+command.Owner+" foregroundAfter="+Native.GetForegroundWindow().ToInt64()
+                            +" rootVisible="+Native.IsWindowVisible(new System.IntPtr(command.Root)));
                         Send(new Packet {Kind="result",Request=command.Request,Error=result,Epoch=currentEpoch});
                         if(retireAfterToggle && command.Operation=="toggle")
                         {
@@ -80,8 +83,10 @@ namespace ClipboardExtensionClean
                         }
                     }
                 }
+                long probeStarted=ActionRules.Now;
                 try {Send(surface.Probe());}
                 catch(Exception error){Send(new Packet {Kind="state",Stamp=ActionRules.Now,Epoch=currentEpoch,Pin="Unknown",Error=error.GetType().Name});}
+                finally {if(ActionRules.Now-probeStarted>300)Wire.LogAsync("slow UIA probe ms="+(ActionRules.Now-probeStarted));}
             }
         }
     }
@@ -90,6 +95,7 @@ namespace ClipboardExtensionClean
         private Process child;
         private readonly BlockingCollection<Packet> outbound=new BlockingCollection<Packet>(32);
         private Packet latest=new Packet();
+        private Packet inputScope=new Packet();
         private Packet armedToggle;
         private readonly DeleteGesture deleteGesture;
         private readonly object requestGate=new object();
@@ -142,6 +148,13 @@ namespace ClipboardExtensionClean
                     if(packet.Kind=="state" && packet.Epoch==Interlocked.Read(ref epoch))
                     {
                         Volatile.Write(ref latest,packet);
+                        var bound=Volatile.Read(ref inputScope);
+                        if(packet.Visible && packet.Focused && packet.Owner!=0)Volatile.Write(ref inputScope,packet);
+                        else if(!packet.Visible || packet.Root!=bound.Root)
+                        {
+                            if(bound.Root!=0)Wire.LogAsync("popup scope ended visible="+packet.Visible+" focused="+packet.Focused+" epoch="+packet.Epoch);
+                            Volatile.Write(ref inputScope,new Packet());
+                        }
                         if(!string.IsNullOrEmpty(packet.Error))
                         {
                             if(++probeErrors>=3)Interlocked.Exchange(ref transportFault,1);
@@ -158,10 +171,10 @@ namespace ClipboardExtensionClean
                         if(!ReferenceEquals(Volatile.Read(ref pending),outstanding))continue;
                         Status=packet.Error ?? "";
                         Interlocked.CompareExchange(ref pending,null,outstanding);
-                        if(Status.Length!=0) Wire.Log("action: "+Status);
                         var next=deferredClear.Take(outstanding.Id,Interlocked.Read(ref epoch),ActionRules.Now);
                         if(next!=null && ContextMatches(next))QueueOperation(next,"clear");
                       }
+                      if(Status.Length!=0)Wire.LogAsync("action: "+Status);
                     }
                 }
             } catch(Exception error) {Interlocked.Exchange(ref transportFault,1);Wire.Log("worker receive: "+error.GetType().Name);}
@@ -173,11 +186,13 @@ namespace ClipboardExtensionClean
         }
         internal void Reset(long owner,int pause)
         {
+            if(Volatile.Read(ref inputScope).Root!=0)Wire.LogAsync("input scope reset pause="+pause+" newOwner="+owner);
             deleteGesture.Cancel();
           lock(requestGate) {
             deferredClear.Cancel();
             long next=Interlocked.Increment(ref epoch);
             Volatile.Write(ref latest,new Packet());
+            Volatile.Write(ref inputScope,new Packet());
             Interlocked.Exchange(ref armedToggle,null);
             // Keep the in-flight watchdog armed even when its context expires.
             Write(new Packet {Kind="reset",Epoch=next,Owner=owner,Stamp=pause});
@@ -196,12 +211,25 @@ namespace ClipboardExtensionClean
                 if(IsBusy)return true;
                 Interlocked.Exchange(ref armedToggle,new Packet {Id=state.Id,Root=state.Root,
                     Owner=state.Owner,Epoch=state.Epoch,Stamp=ActionRules.Now});
-                Wire.Log("Insert armed; awaiting physical key-up");
+                Wire.LogAsync("Insert armed; awaiting physical key-up");
                 return true;
             }
             Interlocked.Exchange(ref armedToggle,null);
             deleteGesture.Press(state);
             return true;
+        }
+        internal bool HandleKey(bool toggle)
+        {
+            try
+            {
+                if(TryAction(toggle)){Wire.LogAsync("key action accepted toggle="+toggle+" busy="+IsBusy);return true;}
+            }
+            catch(Exception error){Wire.LogAsync("key action error: "+error.GetType().Name);}
+            var current=Latest;var bound=Volatile.Read(ref inputScope);
+            bool owns=ClipboardInputScope.Owns(current,bound,Interlocked.Read(ref epoch),ActionRules.Now,IsBusy,
+                Native.GetForegroundWindow().ToInt64(),bound.Root!=0 && Native.IsWindowVisible(new System.IntPtr(bound.Root)));
+            Wire.LogAsync("key action withheld toggle="+toggle+" consumed="+owns+" age="+(ActionRules.Now-current.Stamp)+" busy="+IsBusy+" focused="+current.Focused);
+            return owns;
         }
         internal void CancelDeleteGesture()
         {
@@ -246,7 +274,7 @@ namespace ClipboardExtensionClean
                 || !Native.IsWindowVisible(new IntPtr(armed.Root)))return;
             foreach(int modifier in new[]{16,17,18,91,92})
                 if((Native.GetAsyncKeyState(modifier)&0x8000)!=0)return;
-            Wire.Log("Insert released; committing saved selection");
+            Wire.LogAsync("Insert released; committing saved selection");
             QueueAction(armed,true);
         }
         private bool QueueAction(Packet state,bool toggle)
@@ -279,8 +307,8 @@ namespace ClipboardExtensionClean
                     long last=Interlocked.Read(ref lastPacket);
                     if(last==0)return ActionRules.Now-startedAt<5000 ? null : "worker startup timeout";
                     var request=Volatile.Read(ref pending);
-                    if(ActionRules.Now-last>=2000)return "worker heartbeat timeout";
-                    if(request!=null && ActionRules.Now-request.Started>=2500)return "worker action timeout";
+                    if(ActionRules.Now-last>=6000)return "worker heartbeat timeout";
+                    if(request!=null && ActionRules.Now-request.Started>=8000)return "worker action timeout";
                     return null;
                 } catch(Exception error) {return error.GetType().Name;}
             }
@@ -299,6 +327,7 @@ namespace ClipboardExtensionClean
         public void Dispose()
         {
             deleteGesture.Dispose();
+            Volatile.Write(ref inputScope,new Packet());
             lock(requestGate){disposed=true;deferredClear.Cancel();}
             Interlocked.Exchange(ref armedToggle,null);
             outbound.CompleteAdding();
